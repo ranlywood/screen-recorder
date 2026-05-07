@@ -23,5 +23,6 @@ Recordings/
 ScreenRecorder.xcodeproj/
 
 # Local manual scripts/backups from development
+.local-backups/
 create_certificate.sh
 test_all_configs.swift

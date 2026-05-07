@@ -9,8 +9,7 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "ScreenRecorder",
-            path: "Sources",
-            exclude: ["main.swift.backup"]
+            path: "Sources"
         )
     ]
 )
