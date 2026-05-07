@@ -1,0 +1,27 @@
+.DS_Store
+.build/
+.dist/
+DerivedData/
+*.xcuserstate
+*.xcuserdata/
+*.xcworkspace/
+*.xcarchive/
+*.dSYM/
+*.backup
+*.log
+
+# Local/generated app bundles and recordings
+*.app/
+*.mov
+*.m4a
+*.caf
+Movies/
+Recordings/
+
+# The historical Xcode project in this local folder is stale.
+# This public repo builds from Swift Package Manager instead.
+ScreenRecorder.xcodeproj/
+
+# Local manual scripts/backups from development
+create_certificate.sh
+test_all_configs.swift
