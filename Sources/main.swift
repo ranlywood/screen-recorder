@@ -2,6 +2,7 @@ import Cocoa
 import ScreenCaptureKit
 import AVFoundation
 import Accelerate
+import Security
 
 let logFileHandle: FileHandle? = {
     let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Movies/Recordings")
@@ -17,6 +18,311 @@ func log(_ message: String) {
     fputs(msg + "\n", stderr)
     logFileHandle?.seekToEndOfFile()
     logFileHandle?.write((msg + "\n").data(using: .utf8) ?? Data())
+}
+
+// MARK: - Groq Transcription
+enum GroqTranscriptionError: LocalizedError {
+    case missingAPIKey
+    case noAudioTrack
+    case unsupportedFileType(String)
+    case exportFailed(String)
+    case invalidResponse
+    case apiError(Int, String)
+    case emptyTranscript
+
+    var errorDescription: String? {
+        switch self {
+        case .missingAPIKey:
+            return "Groq API key is not configured"
+        case .noAudioTrack:
+            return "Recording has no audio track to transcribe"
+        case .unsupportedFileType(let ext):
+            return "Unsupported recording file type: .\(ext)"
+        case .exportFailed(let message):
+            return "Audio export failed: \(message)"
+        case .invalidResponse:
+            return "Groq returned an invalid response"
+        case .apiError(let status, let body):
+            return "Groq API error \(status): \(body)"
+        case .emptyTranscript:
+            return "Groq returned an empty transcript"
+        }
+    }
+}
+
+struct GroqTranscriptionResponse: Decodable {
+    let text: String
+}
+
+struct PreparedAudioFile {
+    let url: URL
+    let shouldDelete: Bool
+}
+
+final class GroqTranscriber {
+    static let serviceName = "io.github.ranlywood.screenrecorder"
+    static let apiKeyAccount = "GROQ_API_KEY"
+
+    private let endpoint = URL(string: "https://api.groq.com/openai/v1/audio/transcriptions")!
+    private let model = ProcessInfo.processInfo.environment["SCREENRECORDER_GROQ_MODEL"] ?? "whisper-large-v3-turbo"
+    private let maxUploadBytes = 23 * 1024 * 1024
+    private let supportedDirectUploadExtensions: Set<String> = ["flac", "mp3", "mp4", "mpeg", "mpga", "m4a", "ogg", "wav", "webm"]
+
+    static func configuredAPIKey() -> String? {
+        if let key = ProcessInfo.processInfo.environment["GROQ_API_KEY"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !key.isEmpty {
+            return key
+        }
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: apiKeyAccount,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess, let data = result as? Data else {
+            return nil
+        }
+
+        let key = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return key?.isEmpty == false ? key : nil
+    }
+
+    static var isConfigured: Bool {
+        configuredAPIKey() != nil
+    }
+
+    func transcribe(recordingURL: URL) async throws -> URL {
+        guard let apiKey = Self.configuredAPIKey() else {
+            throw GroqTranscriptionError.missingAPIKey
+        }
+
+        let prepared = try await prepareAudioUpload(from: recordingURL)
+        defer {
+            if prepared.shouldDelete {
+                try? FileManager.default.removeItem(at: prepared.url)
+            }
+        }
+
+        let parts = try await audioUploadParts(for: prepared.url)
+        defer {
+            for part in parts where part.shouldDelete {
+                try? FileManager.default.removeItem(at: part.url)
+            }
+        }
+
+        var transcriptParts: [String] = []
+        for (index, part) in parts.enumerated() {
+            log("Transcribing part \(index + 1)/\(parts.count): \(part.url.lastPathComponent)")
+            let text = try await transcribeAudioFile(part.url, apiKey: apiKey)
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                transcriptParts.append(trimmed)
+            }
+        }
+
+        let transcript = transcriptParts.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !transcript.isEmpty else {
+            throw GroqTranscriptionError.emptyTranscript
+        }
+
+        let outputURL = try transcriptOutputURL(for: recordingURL)
+        try transcript.write(to: outputURL, atomically: true, encoding: .utf8)
+        return outputURL
+    }
+
+    private func prepareAudioUpload(from recordingURL: URL) async throws -> PreparedAudioFile {
+        let ext = recordingURL.pathExtension.lowercased()
+        if supportedDirectUploadExtensions.contains(ext) {
+            return PreparedAudioFile(url: recordingURL, shouldDelete: false)
+        }
+
+        if ext == "mov" {
+            let audioURL = try await exportAudioAsM4A(from: recordingURL)
+            return PreparedAudioFile(url: audioURL, shouldDelete: true)
+        }
+
+        throw GroqTranscriptionError.unsupportedFileType(ext.isEmpty ? "unknown" : ext)
+    }
+
+    private func audioUploadParts(for audioURL: URL) async throws -> [PreparedAudioFile] {
+        let size = try fileSize(at: audioURL)
+        guard size > maxUploadBytes else {
+            return [PreparedAudioFile(url: audioURL, shouldDelete: false)]
+        }
+
+        let asset = AVURLAsset(url: audioURL)
+        let duration = try await asset.load(.duration).seconds
+        guard duration.isFinite, duration > 0 else {
+            return [PreparedAudioFile(url: audioURL, shouldDelete: false)]
+        }
+
+        let bytesPerSecond = Double(size) / duration
+        let targetBytes = Double(maxUploadBytes) * 0.85
+        let secondsPerPart = max(30, min(600, targetBytes / max(bytesPerSecond, 1)))
+
+        var parts: [PreparedAudioFile] = []
+        var start: Double = 0
+        var index = 1
+
+        while start < duration {
+            let partDuration = min(secondsPerPart, duration - start)
+            let startTime = CMTime(seconds: start, preferredTimescale: 600)
+            let durationTime = CMTime(seconds: partDuration, preferredTimescale: 600)
+            let timeRange = CMTimeRange(start: startTime, duration: durationTime)
+            let partURL = try await exportAudioAsM4A(from: audioURL, timeRange: timeRange, suffix: "part\(index)")
+            parts.append(PreparedAudioFile(url: partURL, shouldDelete: true))
+            start += partDuration
+            index += 1
+        }
+
+        return parts
+    }
+
+    private func exportAudioAsM4A(from sourceURL: URL, timeRange: CMTimeRange? = nil, suffix: String = "audio") async throws -> URL {
+        let asset = AVURLAsset(url: sourceURL)
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+        guard !audioTracks.isEmpty else {
+            throw GroqTranscriptionError.noAudioTrack
+        }
+
+        guard let exporter = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
+            throw GroqTranscriptionError.exportFailed("Apple M4A export preset is unavailable")
+        }
+
+        let baseName = sourceURL.deletingPathExtension().lastPathComponent
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(baseName)_\(suffix)_\(UUID().uuidString).m4a")
+
+        try? FileManager.default.removeItem(at: outputURL)
+        exporter.outputURL = outputURL
+        exporter.outputFileType = .m4a
+        if let timeRange {
+            exporter.timeRange = timeRange
+        }
+
+        try await withCheckedThrowingContinuation { continuation in
+            exporter.exportAsynchronously {
+                switch exporter.status {
+                case .completed:
+                    continuation.resume()
+                case .failed, .cancelled:
+                    continuation.resume(throwing: GroqTranscriptionError.exportFailed(exporter.error?.localizedDescription ?? "unknown error"))
+                default:
+                    continuation.resume(throwing: GroqTranscriptionError.exportFailed("unexpected export status \(exporter.status.rawValue)"))
+                }
+            }
+        }
+
+        return outputURL
+    }
+
+    private func transcribeAudioFile(_ fileURL: URL, apiKey: String) async throws -> String {
+        var request = URLRequest(url: endpoint, timeoutInterval: 600)
+        let boundary = "Boundary-\(UUID().uuidString)"
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        let body = try multipartBody(fileURL: fileURL, boundary: boundary)
+        let (data, response) = try await URLSession.shared.upload(for: request, from: body)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw GroqTranscriptionError.invalidResponse
+        }
+
+        guard (200...299).contains(httpResponse.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? "unreadable response"
+            throw GroqTranscriptionError.apiError(httpResponse.statusCode, String(body.prefix(1000)))
+        }
+
+        let decoded = try JSONDecoder().decode(GroqTranscriptionResponse.self, from: data)
+        return decoded.text
+    }
+
+    private func multipartBody(fileURL: URL, boundary: String) throws -> Data {
+        var data = Data()
+
+        func append(_ string: String) {
+            data.append(string.data(using: .utf8) ?? Data())
+        }
+
+        append("--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"model\"\r\n\r\n")
+        append("\(model)\r\n")
+
+        append("--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"response_format\"\r\n\r\n")
+        append("json\r\n")
+
+        append("--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"temperature\"\r\n\r\n")
+        append("0\r\n")
+
+        append("--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"file\"; filename=\"\(fileURL.lastPathComponent)\"\r\n")
+        append("Content-Type: \(mimeType(for: fileURL))\r\n\r\n")
+        data.append(try Data(contentsOf: fileURL))
+        append("\r\n")
+        append("--\(boundary)--\r\n")
+
+        return data
+    }
+
+    private func transcriptOutputURL(for recordingURL: URL) throws -> URL {
+        let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")
+        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+
+        let baseName = recordingURL.deletingPathExtension().lastPathComponent
+        let initialURL = downloads.appendingPathComponent("\(baseName)_transcript.txt")
+        return uniqueURL(initialURL)
+    }
+
+    private func uniqueURL(_ url: URL) -> URL {
+        guard FileManager.default.fileExists(atPath: url.path) else { return url }
+
+        let directory = url.deletingLastPathComponent()
+        let baseName = url.deletingPathExtension().lastPathComponent
+        let ext = url.pathExtension
+
+        for index in 2...999 {
+            let candidate = directory.appendingPathComponent("\(baseName)-\(index)").appendingPathExtension(ext)
+            if !FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+
+        return directory.appendingPathComponent("\(baseName)-\(UUID().uuidString)").appendingPathExtension(ext)
+    }
+
+    private func fileSize(at url: URL) throws -> Int64 {
+        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+        return attrs[.size] as? Int64 ?? 0
+    }
+
+    private func mimeType(for url: URL) -> String {
+        switch url.pathExtension.lowercased() {
+        case "flac":
+            return "audio/flac"
+        case "mp3", "mpeg", "mpga":
+            return "audio/mpeg"
+        case "m4a", "mp4":
+            return "audio/mp4"
+        case "ogg":
+            return "audio/ogg"
+        case "wav":
+            return "audio/wav"
+        case "webm":
+            return "audio/webm"
+        default:
+            return "application/octet-stream"
+        }
+    }
 }
 
 // MARK: - Recorder
@@ -74,6 +380,38 @@ class Recorder: NSObject, SCStreamDelegate, SCStreamOutput {
     private func configureWriterForResilience(_ writer: AVAssetWriter) {
         writer.shouldOptimizeForNetworkUse = true
         writer.movieFragmentInterval = CMTime(seconds: 2, preferredTimescale: 1)
+    }
+
+    private func startAutomaticTranscription(for recordingURL: URL) {
+        guard GroqTranscriber.isConfigured else {
+            log("Automatic transcription skipped: Groq API key is not configured")
+            return
+        }
+
+        onStatusChange?("Saved. Transcribing...")
+        let transcriber = GroqTranscriber()
+        let statusHandler = onStatusChange
+
+        Task.detached(priority: .utility) {
+            do {
+                let transcriptURL = try await transcriber.transcribe(recordingURL: recordingURL)
+                log("Transcript saved: \(transcriptURL.path)")
+                await MainActor.run {
+                    statusHandler?("Transcript saved")
+                    NSWorkspace.shared.activateFileViewerSelecting([transcriptURL])
+                }
+            } catch GroqTranscriptionError.noAudioTrack {
+                log("Automatic transcription skipped: recording has no audio track")
+                await MainActor.run {
+                    statusHandler?("Saved (no audio to transcribe)")
+                }
+            } catch {
+                log("Automatic transcription failed: \(error.localizedDescription)")
+                await MainActor.run {
+                    statusHandler?("Transcription failed")
+                }
+            }
+        }
     }
 
     /// Mic-only dictaphone: AVAudioEngine -> AVAssetWriter -> .m4a
@@ -272,6 +610,7 @@ class Recorder: NSObject, SCStreamDelegate, SCStreamOutput {
             onStatusChange?("Saved!")
             log("Mic-only saved: \(url.path)")
             NSWorkspace.shared.activateFileViewerSelecting([url])
+            startAutomaticTranscription(for: url)
         }
     }
 
@@ -697,6 +1036,7 @@ class Recorder: NSObject, SCStreamDelegate, SCStreamOutput {
                 onStatusChange?(interrupted ? "Interrupted recording saved!" : "Saved!")
             }
             NSWorkspace.shared.activateFileViewerSelecting([url])
+            startAutomaticTranscription(for: url)
         }
 
         recordedSystemAudio = false

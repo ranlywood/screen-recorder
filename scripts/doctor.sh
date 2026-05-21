@@ -35,6 +35,7 @@ fi
 check_required "Swift toolchain" swift
 check_required "codesign" codesign
 check_required "plutil" plutil
+check_required "security" security
 
 if [[ -n "${SCREENRECORDER_FFMPEG:-}" && -x "$SCREENRECORDER_FFMPEG" ]]; then
   note "[ok] ffmpeg: $SCREENRECORDER_FFMPEG"
@@ -49,6 +50,14 @@ elif [[ -x /opt/local/bin/ffmpeg ]]; then
 else
   note "[warn] ffmpeg not found. Screen-only, system-audio-only, and mic-only modes still work; mixed mic+screen/audio exports need ffmpeg."
   note "       Install with: brew install ffmpeg"
+fi
+
+if [[ -n "${GROQ_API_KEY:-}" ]]; then
+  note "[ok] Groq transcription key: GROQ_API_KEY environment variable"
+elif command -v security >/dev/null 2>&1 && security find-generic-password -s "io.github.ranlywood.screenrecorder" -a "GROQ_API_KEY" -w >/dev/null 2>&1; then
+  note "[ok] Groq transcription key: macOS Keychain"
+else
+  note "[warn] Groq transcription key not configured. Automatic transcripts are disabled until you run: scripts/configure_groq.sh"
 fi
 
 note ""

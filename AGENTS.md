@@ -12,6 +12,7 @@ Install a free, local, macOS-only screen recorder that can record:
 - system audio
 - microphone-only voice notes
 - system-audio-only clips
+- automatic Groq transcripts in `~/Downloads`
 
 ## Safe install commands
 
@@ -20,6 +21,13 @@ Run these commands from the cloned repository:
 ```bash
 scripts/doctor.sh
 scripts/install.sh
+```
+
+If `GROQ_API_KEY` is available in the agent environment, configure automatic
+transcription with:
+
+```bash
+scripts/configure_groq.sh
 ```
 
 If the user wants mixed microphone + system/screen exports and `ffmpeg` is
@@ -53,3 +61,7 @@ It requires macOS 13 or newer because it uses ScreenCaptureKit.
 
 The app has no cloud backend and no analytics. Recordings and logs stay under
 `~/Movies/Recordings`.
+
+If Groq transcription is configured, the app uploads finished recording audio
+to Groq and writes the transcript to `~/Downloads`. Never print or commit the
+Groq API key.

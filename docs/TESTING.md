@@ -20,6 +20,18 @@ This checks:
 - ad-hoc code signing
 - bundle identifier
 
+## Groq transcription setup
+
+Configure automatic transcription:
+
+```bash
+scripts/configure_groq.sh
+scripts/doctor.sh
+```
+
+When configured, each recording with an audio track should produce a transcript
+in `~/Downloads`.
+
 ## Manual recording matrix
 
 Install and open the app:
@@ -31,6 +43,8 @@ open "$HOME/Applications/Screen Recorder.app"
 
 For each row, enable the listed sources, record for 5-10 seconds, stop, and
 verify that a non-empty file appears in `~/Movies/Recordings`.
+If Groq is configured, also verify that a non-empty `_transcript.txt` file
+appears in `~/Downloads`.
 
 | Screen | Microphone | System Audio | Expected file | Notes |
 | --- | --- | --- | --- | --- |

@@ -15,14 +15,16 @@ simple dictaphone.
 - Microphone-only voice notes to `.m4a`
 - System-audio-only recording to `.m4a`
 - Optional mixed microphone + system audio exports
+- Automatic Groq transcription to `.txt` in `~/Downloads`
 - Local recordings folder at `~/Movies/Recordings`
-- No analytics, no account, no upload
+- No analytics or account; transcription uploads audio only when you configure a Groq API key
 
 ## Requirements
 
 - macOS 13 Ventura or newer
 - Swift toolchain or Xcode Command Line Tools
 - `ffmpeg` for final exports that mix microphone audio with screen/system audio
+- Groq API key for automatic transcription
 
 Screen-only, microphone-only, system-audio-only, and screen+system-audio modes
 do not require `ffmpeg`.
@@ -43,6 +45,40 @@ scripts/install.sh --install-ffmpeg
 ```
 
 The app is installed to `~/Applications/Screen Recorder.app` by default.
+
+## Automatic Transcription
+
+Screen Recorder can automatically transcribe each finished recording with Groq.
+The transcript is saved to `~/Downloads` as:
+
+```text
+<recording-name>_transcript.txt
+```
+
+Configure the API key once:
+
+```bash
+scripts/configure_groq.sh
+```
+
+If your local agent already has `GROQ_API_KEY` in its environment:
+
+```bash
+GROQ_API_KEY="$GROQ_API_KEY" scripts/configure_groq.sh
+```
+
+The app reads the key from macOS Keychain, so it still works when launched from
+Finder. The key is not stored in the repository.
+
+Large recordings are split into smaller temporary `.m4a` uploads before
+transcription, then the transcript parts are joined into one `.txt` file.
+
+By default transcription uses `whisper-large-v3-turbo` for speed. To test with a
+shell-launched app, you can override the model:
+
+```bash
+SCREENRECORDER_GROQ_MODEL=whisper-large-v3 open "$HOME/Applications/Screen Recorder.app"
+```
 
 ## Install With Codex Or Claude Code
 
@@ -97,13 +133,14 @@ Restart Screen Recorder after changing permissions.
 
 ## Privacy
 
-Screen Recorder is local-first:
+Screen Recorder is local-first unless Groq transcription is configured:
 
 - no analytics
 - no accounts
-- no network upload
 - recordings saved to `~/Movies/Recordings`
+- transcripts saved to `~/Downloads`
 - diagnostic log saved to `~/Movies/Recordings/screenrecorder.log`
+- audio is uploaded to Groq only for automatic transcription after you configure an API key
 
 See [docs/PRIVACY.md](docs/PRIVACY.md).
 
