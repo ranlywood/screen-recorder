@@ -398,7 +398,6 @@ class Recorder: NSObject, SCStreamDelegate, SCStreamOutput {
                 log("Transcript saved: \(transcriptURL.path)")
                 await MainActor.run {
                     statusHandler?("Transcript saved")
-                    NSWorkspace.shared.activateFileViewerSelecting([transcriptURL])
                 }
             } catch GroqTranscriptionError.noAudioTrack {
                 log("Automatic transcription skipped: recording has no audio track")
@@ -609,7 +608,6 @@ class Recorder: NSObject, SCStreamDelegate, SCStreamOutput {
         if let url = outputURL {
             onStatusChange?("Saved!")
             log("Mic-only saved: \(url.path)")
-            NSWorkspace.shared.activateFileViewerSelecting([url])
             startAutomaticTranscription(for: url)
         }
     }
@@ -1035,7 +1033,6 @@ class Recorder: NSObject, SCStreamDelegate, SCStreamOutput {
             } else {
                 onStatusChange?(interrupted ? "Interrupted recording saved!" : "Saved!")
             }
-            NSWorkspace.shared.activateFileViewerSelecting([url])
             startAutomaticTranscription(for: url)
         }
 
