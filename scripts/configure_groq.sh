@@ -54,6 +54,12 @@ esac
 api_key="${GROQ_API_KEY:-}"
 
 if [[ -z "$api_key" ]]; then
+  if [[ ! -t 0 ]]; then
+    echo "GROQ_API_KEY is not set and stdin is not interactive." >&2
+    echo "Run: GROQ_API_KEY=\"your-key\" scripts/configure_groq.sh" >&2
+    exit 1
+  fi
+
   printf "Paste Groq API key: "
   stty -echo
   read -r api_key
