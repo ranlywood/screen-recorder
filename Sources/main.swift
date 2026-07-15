@@ -396,6 +396,22 @@ class Recorder: NSObject, SCStreamDelegate, SCStreamOutput {
             do {
                 let transcriptURL = try await transcriber.transcribe(recordingURL: recordingURL)
                 log("Transcript saved: \(transcriptURL.path)")
+                // knowledge-base filing hook: раскладывает свежий транскрипт по доменам.
+                // Запускается как дочерний процесс рекордера, поэтому наследует его доступ
+                // к ~/Downloads (обходит TCC, из-за которого launchd-агент не работает).
+                let kbScript = FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent("knowledge-base/bin/watch_downloads.sh").path
+                if FileManager.default.fileExists(atPath: kbScript) {
+                    let kbProcess = Process()
+                    kbProcess.executableURL = URL(fileURLWithPath: "/bin/bash")
+                    kbProcess.arguments = [kbScript]
+                    do {
+                        try kbProcess.run()
+                        log("KB filing hook launched for \(transcriptURL.lastPathComponent)")
+                    } catch {
+                        log("KB filing hook failed: \(error.localizedDescription)")
+                    }
+                }
                 await MainActor.run {
                     statusHandler?("Transcript saved")
                 }
@@ -1578,7 +1594,7 @@ class RecorderWindow: NSWindow {
         content.addSubview(systemLevel)
 
         // Record button
-        recordButton = NSButton(frame: NSRect(x: 20, y: 30, width: 200, height: 44))
+        recordButton = NSButton(frame: NSRect(x: 20, y: 30, width: 150, height: 44))
         recordButton.title = "Start Recording"
         recordButton.bezelStyle = .rounded
         recordButton.font = NSFont.systemFont(ofSize: 14, weight: .medium)
@@ -1587,13 +1603,22 @@ class RecorderWindow: NSWindow {
         content.addSubview(recordButton)
 
         // Open Recordings folder button
-        let openFolderButton = NSButton(frame: NSRect(x: 240, y: 30, width: 240, height: 44))
+        let openFolderButton = NSButton(frame: NSRect(x: 180, y: 30, width: 150, height: 44))
         openFolderButton.title = "Open Folder"
         openFolderButton.bezelStyle = .rounded
         openFolderButton.font = NSFont.systemFont(ofSize: 14, weight: .regular)
         openFolderButton.target = self
         openFolderButton.action = #selector(openRecordingsFolder)
         content.addSubview(openFolderButton)
+
+        // Open Transcripts folder button — общая лента всех транскриптов
+        let openTranscriptsButton = NSButton(frame: NSRect(x: 340, y: 30, width: 150, height: 44))
+        openTranscriptsButton.title = "Transcripts"
+        openTranscriptsButton.bezelStyle = .rounded
+        openTranscriptsButton.font = NSFont.systemFont(ofSize: 14, weight: .regular)
+        openTranscriptsButton.target = self
+        openTranscriptsButton.action = #selector(openTranscriptsFolder)
+        content.addSubview(openTranscriptsButton)
 
         contentView = content
 
@@ -1629,6 +1654,14 @@ class RecorderWindow: NSWindow {
 
     @objc func openRecordingsFolder() {
         let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Movies/Recordings")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(dir)
+    }
+
+    @objc func openTranscriptsFolder() {
+        // Общая папка со всеми транскриптами (кластеризация по доменам — в meetings/)
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("knowledge-base/all")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         NSWorkspace.shared.open(dir)
     }
