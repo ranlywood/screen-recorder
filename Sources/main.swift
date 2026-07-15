@@ -96,6 +96,22 @@ final class GroqTranscriber {
         configuredAPIKey() != nil
     }
 
+    /// Записывает ключ в тот же Keychain-item, откуда читает configuredAPIKey().
+    @discardableResult
+    static func saveAPIKey(_ key: String) -> Bool {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else { return false }
+        let base: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: apiKeyAccount
+        ]
+        SecItemDelete(base as CFDictionary)
+        var add = base
+        add[kSecValueData as String] = data
+        return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
+    }
+
     func transcribe(recordingURL: URL) async throws -> URL {
         guard let apiKey = Self.configuredAPIKey() else {
             throw GroqTranscriptionError.missingAPIKey
@@ -1515,6 +1531,8 @@ class RecorderWindow: NSWindow {
     var recordButton: NSButton!
     var timerLabel: NSTextField!
     var statusLabel: NSTextField!
+    var keyStatusLabel: NSTextField!
+    var keyField: NSSecureTextField!
 
     var screenToggle: NSButton!
     var micToggle: NSButton!
@@ -1527,14 +1545,43 @@ class RecorderWindow: NSWindow {
     var startTime: Date?
 
     init() {
-        super.init(contentRect: NSRect(x: 0, y: 0, width: 500, height: 480),
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 500, height: 590),
                    styleMask: [.titled, .closable, .miniaturizable],
                    backing: .buffered, defer: false)
         title = "Screen Recorder"
         center()
 
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: 480))
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: 590))
         content.wantsLayer = true
+
+        // === Секция Groq API-ключа (для не-технического пользователя) ===
+        let keyTitle = NSTextField(labelWithString: "Groq API Key")
+        keyTitle.frame = NSRect(x: 20, y: 555, width: 140, height: 20)
+        keyTitle.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        content.addSubview(keyTitle)
+
+        keyStatusLabel = NSTextField(labelWithString: "")
+        keyStatusLabel.frame = NSRect(x: 165, y: 555, width: 315, height: 20)
+        content.addSubview(keyStatusLabel)
+
+        keyField = NSSecureTextField(frame: NSRect(x: 20, y: 520, width: 300, height: 24))
+        keyField.placeholderString = "Вставь ключ (gsk_…)"
+        content.addSubview(keyField)
+
+        let saveKeyButton = NSButton(frame: NSRect(x: 328, y: 517, width: 72, height: 28))
+        saveKeyButton.title = "Save"
+        saveKeyButton.bezelStyle = .rounded
+        saveKeyButton.target = self
+        saveKeyButton.action = #selector(saveGroqKey)
+        content.addSubview(saveKeyButton)
+
+        let getKeyButton = NSButton(frame: NSRect(x: 408, y: 517, width: 72, height: 28))
+        getKeyButton.title = "Get key"
+        getKeyButton.bezelStyle = .rounded
+        getKeyButton.target = self
+        getKeyButton.action = #selector(openGroqKeyPage)
+        content.addSubview(getKeyButton)
+        refreshKeyStatus()
 
         // Preview
         previewView = PreviewView(frame: NSRect(x: 20, y: 200, width: 460, height: 260))
@@ -1659,11 +1706,37 @@ class RecorderWindow: NSWindow {
     }
 
     @objc func openTranscriptsFolder() {
-        // Общая папка со всеми транскриптами (кластеризация по доменам — в meetings/)
+        // Общая лента всех транскриптов (кластеризация по доменам — там же в meetings/)
         let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("knowledge-base/all")
+            .appendingPathComponent("knowledge-base/meetings/all")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         NSWorkspace.shared.open(dir)
+    }
+
+    @objc func openGroqKeyPage() {
+        if let url = URL(string: "https://console.groq.com/keys") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc func saveGroqKey() {
+        let ok = GroqTranscriber.saveAPIKey(keyField.stringValue)
+        if ok { keyField.stringValue = "" }
+        refreshKeyStatus()
+        if !ok {
+            keyStatusLabel.stringValue = "Не удалось сохранить ключ"
+            keyStatusLabel.textColor = .systemRed
+        }
+    }
+
+    func refreshKeyStatus() {
+        if let key = GroqTranscriber.configuredAPIKey(), key.count >= 4 {
+            keyStatusLabel.stringValue = "✓ Key applied  …" + String(key.suffix(4))
+            keyStatusLabel.textColor = .systemGreen
+        } else {
+            keyStatusLabel.stringValue = "No key set"
+            keyStatusLabel.textColor = .secondaryLabelColor
+        }
     }
 
     @objc func toggleScreen() {
