@@ -62,6 +62,7 @@ struct PreparedAudioFile {
 final class GroqTranscriber {
     static let serviceName = "io.github.ranlywood.screenrecorder"
     static let apiKeyAccount = "GROQ_API_KEY"
+    static let apiKeyAccount2 = "GROQ_API_KEY_2"  // резервный ключ (второй аккаунт Groq) на случай 429
 
     private let endpoint = URL(string: "https://api.groq.com/openai/v1/audio/transcriptions")!
     private let model = ProcessInfo.processInfo.environment["SCREENRECORDER_GROQ_MODEL"] ?? "whisper-large-v3-turbo"
@@ -112,8 +113,45 @@ final class GroqTranscriber {
         return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
     }
 
+    /// Резервный ключ (из второго аккаунта Groq) — читается из env GROQ_API_KEY_2 или Keychain.
+    static func configuredAPIKey2() -> String? {
+        if let key = ProcessInfo.processInfo.environment["GROQ_API_KEY_2"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !key.isEmpty {
+            return key
+        }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: apiKeyAccount2,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data else {
+            return nil
+        }
+        let key = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return key?.isEmpty == false ? key : nil
+    }
+
+    @discardableResult
+    static func saveAPIKey2(_ key: String) -> Bool {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else { return false }
+        let base: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: apiKeyAccount2
+        ]
+        SecItemDelete(base as CFDictionary)
+        var add = base
+        add[kSecValueData as String] = data
+        return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
+    }
+
     func transcribe(recordingURL: URL) async throws -> URL {
-        guard let apiKey = Self.configuredAPIKey() else {
+        let keys = [Self.configuredAPIKey(), Self.configuredAPIKey2()].compactMap { $0 }
+        guard !keys.isEmpty else {
             throw GroqTranscriptionError.missingAPIKey
         }
 
@@ -134,7 +172,7 @@ final class GroqTranscriber {
         var transcriptParts: [String] = []
         for (index, part) in parts.enumerated() {
             log("Transcribing part \(index + 1)/\(parts.count): \(part.url.lastPathComponent)")
-            let text = try await transcribeAudioFile(part.url, apiKey: apiKey)
+            let text = try await transcribeWithFallback(part.url, keys: keys)
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
                 transcriptParts.append(trimmed)
@@ -235,6 +273,24 @@ final class GroqTranscriber {
         }
 
         return outputURL
+    }
+
+    /// Пробует ключи по очереди: на 429 (лимит) переключается на следующий (второй аккаунт).
+    private func transcribeWithFallback(_ fileURL: URL, keys: [String]) async throws -> String {
+        var lastError: Error = GroqTranscriptionError.missingAPIKey
+        for (i, key) in keys.enumerated() {
+            do {
+                return try await transcribeAudioFile(fileURL, apiKey: key)
+            } catch GroqTranscriptionError.apiError(let code, let bodyText) {
+                lastError = GroqTranscriptionError.apiError(code, bodyText)
+                if code == 429 && i < keys.count - 1 {
+                    log("Groq key \(i + 1) rate-limited (429), switching to backup key \(i + 2)")
+                    continue
+                }
+                throw lastError
+            }
+        }
+        throw lastError
     }
 
     private func transcribeAudioFile(_ fileURL: URL, apiKey: String) async throws -> String {
@@ -1533,6 +1589,8 @@ class RecorderWindow: NSWindow {
     var statusLabel: NSTextField!
     var keyStatusLabel: NSTextField!
     var keyField: NSSecureTextField!
+    var keyStatusLabel2: NSTextField!
+    var keyField2: NSSecureTextField!
 
     var screenToggle: NSButton!
     var micToggle: NSButton!
@@ -1545,42 +1603,66 @@ class RecorderWindow: NSWindow {
     var startTime: Date?
 
     init() {
-        super.init(contentRect: NSRect(x: 0, y: 0, width: 500, height: 590),
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 500, height: 660),
                    styleMask: [.titled, .closable, .miniaturizable],
                    backing: .buffered, defer: false)
         title = "Screen Recorder"
         center()
 
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: 590))
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: 660))
         content.wantsLayer = true
 
-        // === Секция Groq API-ключа (для не-технического пользователя) ===
+        // === Секция Groq API-ключей (основной + резервный) ===
+        // -- Ключ 1 (основной) --
         let keyTitle = NSTextField(labelWithString: "Groq API Key")
-        keyTitle.frame = NSRect(x: 20, y: 555, width: 140, height: 20)
+        keyTitle.frame = NSRect(x: 20, y: 625, width: 140, height: 20)
         keyTitle.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         content.addSubview(keyTitle)
 
         keyStatusLabel = NSTextField(labelWithString: "")
-        keyStatusLabel.frame = NSRect(x: 165, y: 555, width: 315, height: 20)
+        keyStatusLabel.frame = NSRect(x: 165, y: 625, width: 315, height: 20)
         content.addSubview(keyStatusLabel)
 
-        keyField = NSSecureTextField(frame: NSRect(x: 20, y: 520, width: 300, height: 24))
+        keyField = NSSecureTextField(frame: NSRect(x: 20, y: 592, width: 300, height: 24))
         keyField.placeholderString = "Вставь ключ (gsk_…)"
         content.addSubview(keyField)
 
-        let saveKeyButton = NSButton(frame: NSRect(x: 328, y: 517, width: 72, height: 28))
+        let saveKeyButton = NSButton(frame: NSRect(x: 328, y: 589, width: 72, height: 28))
         saveKeyButton.title = "Save"
         saveKeyButton.bezelStyle = .rounded
         saveKeyButton.target = self
         saveKeyButton.action = #selector(saveGroqKey)
         content.addSubview(saveKeyButton)
 
-        let getKeyButton = NSButton(frame: NSRect(x: 408, y: 517, width: 72, height: 28))
+        let getKeyButton = NSButton(frame: NSRect(x: 408, y: 589, width: 72, height: 28))
         getKeyButton.title = "Get key"
         getKeyButton.bezelStyle = .rounded
         getKeyButton.target = self
         getKeyButton.action = #selector(openGroqKeyPage)
         content.addSubview(getKeyButton)
+
+        // -- Ключ 2 (резервный, из второго аккаунта Groq) --
+        let keyTitle2 = NSTextField(labelWithString: "Backup key (2-й аккаунт)")
+        keyTitle2.frame = NSRect(x: 20, y: 557, width: 200, height: 20)
+        keyTitle2.font = NSFont.systemFont(ofSize: 12, weight: .regular)
+        keyTitle2.textColor = .secondaryLabelColor
+        content.addSubview(keyTitle2)
+
+        keyStatusLabel2 = NSTextField(labelWithString: "")
+        keyStatusLabel2.frame = NSRect(x: 225, y: 557, width: 255, height: 20)
+        content.addSubview(keyStatusLabel2)
+
+        keyField2 = NSSecureTextField(frame: NSRect(x: 20, y: 524, width: 300, height: 24))
+        keyField2.placeholderString = "Резервный ключ (другой аккаунт)"
+        content.addSubview(keyField2)
+
+        let saveKeyButton2 = NSButton(frame: NSRect(x: 328, y: 521, width: 72, height: 28))
+        saveKeyButton2.title = "Save"
+        saveKeyButton2.bezelStyle = .rounded
+        saveKeyButton2.target = self
+        saveKeyButton2.action = #selector(saveGroqKey2)
+        content.addSubview(saveKeyButton2)
+
         refreshKeyStatus()
 
         // Preview
@@ -1729,6 +1811,16 @@ class RecorderWindow: NSWindow {
         }
     }
 
+    @objc func saveGroqKey2() {
+        let ok = GroqTranscriber.saveAPIKey2(keyField2.stringValue)
+        if ok { keyField2.stringValue = "" }
+        refreshKeyStatus()
+        if !ok {
+            keyStatusLabel2.stringValue = "Не удалось сохранить ключ"
+            keyStatusLabel2.textColor = .systemRed
+        }
+    }
+
     func refreshKeyStatus() {
         if let key = GroqTranscriber.configuredAPIKey(), key.count >= 4 {
             keyStatusLabel.stringValue = "✓ Key applied  …" + String(key.suffix(4))
@@ -1736,6 +1828,13 @@ class RecorderWindow: NSWindow {
         } else {
             keyStatusLabel.stringValue = "No key set"
             keyStatusLabel.textColor = .secondaryLabelColor
+        }
+        if let key2 = GroqTranscriber.configuredAPIKey2(), key2.count >= 4 {
+            keyStatusLabel2.stringValue = "✓ applied  …" + String(key2.suffix(4))
+            keyStatusLabel2.textColor = .systemGreen
+        } else {
+            keyStatusLabel2.stringValue = "не задан (опционально)"
+            keyStatusLabel2.textColor = .tertiaryLabelColor
         }
     }
 
