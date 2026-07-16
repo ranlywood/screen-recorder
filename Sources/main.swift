@@ -1185,8 +1185,11 @@ class Recorder: NSObject, SCStreamDelegate, SCStreamOutput {
                 "-i", micURL.path,            // Input 2: microphone audio
                 "-filter_complex", "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0[aout]",
                 "-map", "[aout]",             // Take mixed audio
+                "-ac", "1",                   // моно (речь) — быстрее и меньше
+                "-ar", "16000",               // 16 кГц (whisper всё равно работает на 16к)
                 "-c:a", "aac",                // Encode audio as AAC
-                "-b:a", "192k",
+                "-b:a", "64k",                // достаточно для речи
+                "-threads", "0",              // все ядра CPU
                 "-y",                         // Overwrite output
                 outputURL.path
             ]
@@ -1195,8 +1198,11 @@ class Recorder: NSObject, SCStreamDelegate, SCStreamOutput {
             process.arguments = [
                 "-i", micURL.path,            // Use microphone as the only audio source
                 "-map", "0:a:0",
+                "-ac", "1",                   // моно (речь)
+                "-ar", "16000",               // 16 кГц
                 "-c:a", "aac",
-                "-b:a", "192k",
+                "-b:a", "64k",
+                "-threads", "0",              // все ядра
                 "-y",
                 outputURL.path
             ]
